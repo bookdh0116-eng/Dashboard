@@ -552,6 +552,7 @@ async function sheetLoad(){
   var r=await fetch(SHEET_API+(SHEET_API.indexOf('?')<0?'?':'&')+'t='+Date.now(),{redirect:'follow',cache:'no-store'});
   var j=await r.json();
   if(j&&j.state&&Array.isArray(j.state.students))loadState(j.state);
+  else settingsDirty=true; // 빈 시트: 지금 도장판을 첫 기록으로 저장할 수 있게
   sheetRev=(j&&j.rev)||'';
 }
 function tableRows(){

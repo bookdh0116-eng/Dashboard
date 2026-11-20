@@ -178,6 +178,8 @@ button.cell:hover .slot{border-color:var(--meadow);background:var(--meadow-soft)
 (function(){
 'use strict';
 var RESET=':root{color-scheme:light;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}html{scroll-padding-top:env(safe-area-inset-top,0px)}body{margin:0;padding:0;font:14px -apple-system,BlinkMacSystemFont,sans-serif;background:#fff;color:#000}img{max-width:100%}[hidden]:not([hidden=until-found i]){display:none!important}';
+/* 구글 시트 저장소: Apps Script 웹 앱 주소(…/exec)를 넣으면 claude.ai 밖(예: Vercel)에서도 저장됩니다 */
+var SHEET_API='https://script.google.com/macros/s/AKfycbzbEmoR-Wwsl-8U0KzvpLM0Ch3eYbES3h2T7Ejvb5xqaZWB5V5HWMtlLC8pV6vATTdwVg/exec';
 var FONT_LINKS='<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Gaegu:wght@700&family=Gowun+Batang:wght@400;700&family=Gowun+Dodum&display=swap">';
 var app=document.getElementById('app');
 var state;
@@ -229,7 +231,10 @@ if(!state.theme)state.theme='meadow';
 var unlocked=false;
 function hasPin(){return !!(state.teacherPin&&state.teacherPin.hash)}
 try{if(hasPin()&&sessionStorage.getItem('pilsa-unlock')===state.teacherPin.hash)unlocked=true}catch(e){}
-function isLocked(){return hasPin()&&!unlocked}
+function isLocked(){return !sheetMode&&hasPin()&&!unlocked}
+var sheetMode=false,sheetRev='',sheetPw='';
+try{sheetPw=sessionStorage.getItem('pilsa-pw')||''}catch(e){}
+function rememberPw(pw){sheetPw=pw;try{if(pw)sessionStorage.setItem('pilsa-pw',pw);else sessionStorage.removeItem('pilsa-pw')}catch(e){}}
 function setUnlocked(v){unlocked=v;try{if(v&&hasPin())sessionStorage.setItem('pilsa-unlock',state.teacherPin.hash);else sessionStorage.removeItem('pilsa-unlock')}catch(e){}}
 function hex(buf){return Array.from(new Uint8Array(buf)).map(function(b){return b.toString(16).padStart(2,'0')}).join('')}
 async function pinHash(pw,salt,iter){var enc=new TextEncoder();
@@ -284,14 +289,15 @@ function toolbar(teacher){
       '<button class="btn" data-act="settings">설정</button>'+
       '<button class="btn" data-act="backup">백업</button>'+
       '<button class="btn" data-act="preview">학생 화면 보기</button>'+
-      (hasPin()?'<button class="btn" data-act="lock">잠그기</button>':'')+
+      (sheetMode?'<button class="btn" data-act="lock">로그아웃</button>':hasPin()?'<button class="btn" data-act="lock">잠그기</button>':'')+
       '<button class="btn primary" data-act="save" '+((pending&&!saving)?'':'disabled')+'>'+(saving?'저장 중…':'저장하기'+(pending?' ('+pending+')':''))+'</button>';
     }else{
       tools=isLocked()?'<span class="note">교사 모드는 비밀번호로 잠겨 있어요</span><button class="btn" data-act="unlock">교사 모드로</button>'
         :'<span class="note">학생에게 보이는 화면입니다</span><button class="btn" data-act="preview">교사 모드로</button>';
     }
   }else{
-    tools='<span class="note">선생님이 검사한 결과가 표시됩니다'+(state.updatedAt?(' · '+fmtTime(state.updatedAt)+' 업데이트'):'')+'</span>';
+    tools='<span class="note">선생님이 검사한 결과가 표시됩니다'+(state.updatedAt?(' · '+fmtTime(state.updatedAt)+' 업데이트'):'')+'</span>'+
+      (sheetMode?'<button class="btn" data-act="login">교사 로그인</button>':'');
   }
   return '<nav class="bar">'+tabs+'<div class="tools">'+tools+'</div></nav>'+
     ((teacher&&state.sample)?'<p class="sample-note">지금은 예시 명단과 예시 도장입니다. <b>설정</b>에서 우리 반 명단과 필사 기간을 넣고 저장하면 실제 도장판이 됩니다.</p>':'')+
@@ -389,6 +395,12 @@ app.addEventListener('click',function(e){
   else if(a==='settings'){openSettings()}
   else if(a==='backup'){openBackup()}
   else if(a==='unlock'){openUnlock()}
+  else if(a==='login'){openUnlock()}
+  else if(a==='lock'&&sheetMode){
+    if((changes.size||settingsDirty)&&!confirm('저장하지 않은 도장이 있어요. 그래도 로그아웃할까요?'))return;
+    rememberPw('');canWrite=false;studentPreview=false;
+    if(changes.size||settingsDirty){changes.clear();settingsDirty=false;sheetLoad().then(render,render)}
+    render();toast('로그아웃했어요.')}
   else if(a==='lock'){setUnlocked(false);studentPreview=false;render();toast('교사 모드를 잠갔어요.');var u=app.querySelector('[data-act=unlock]');if(u)u.focus()}
   else if(a==='save'){save()}
 });
@@ -427,9 +439,10 @@ function openSettings(){
   '<div class="full" role="radiogroup" aria-labelledby="f-theme-h"><span id="f-theme-h" class="note">페이지 테마</span><div class="themes" style="margin-top:6px">'+
   THEMES.map(function(t){return '<label><input type="radio" name="f-theme" id="f-theme-'+t[0]+'" value="'+t[0]+'"'+(state.theme===t[0]?' checked':'')+'><i style="background:'+t[2]+'"></i>'+t[1]+'</label>'}).join('')+
   '</div></div>'+
+  (sheetMode?'<p class="full hint">교사 비밀번호는 구글 시트의 Apps Script(TEACHER_PASSWORD)에서 바꿔요.</p>':
   '<label>교사 모드 비밀번호<input type="password" id="f-pin" autocomplete="new-password" placeholder="'+(hasPin()?'바꿀 때만 입력':'4자 이상')+'"><span class="hint">'+(hasPin()?'지금 비밀번호가 걸려 있어요.':'비워 두면 비밀번호 없이 들어가요.')+'</span></label>'+
   '<label>비밀번호 확인<input type="password" id="f-pin2" autocomplete="new-password"></label>'+
-  (hasPin()?'<label class="check full"><input type="checkbox" id="f-pinoff"> 비밀번호 없애기</label>':'')+
+  (hasPin()?'<label class="check full"><input type="checkbox" id="f-pinoff"> 비밀번호 없애기</label>':''))+
   '<p class="full" id="f-preview"></p><p class="err full" id="f-err" hidden></p>'+
   '</form><div class="actions"><button class="btn" id="f-cancel" type="button">취소</button><button class="btn primary" id="f-apply" type="button">적용</button></div></div>';
   document.body.appendChild(bg);
@@ -459,7 +472,7 @@ function openSettings(){
   bg.addEventListener('click',function(e){if(e.target===bg)close()});
   q('f-apply').onclick=async function(){
     var f=readForm(),err=q('f-err');
-    var pw=q('f-pin').value,pw2=q('f-pin2').value,pinOff=!!(q('f-pinoff')&&q('f-pinoff').checked);
+    var pw=q('f-pin')?q('f-pin').value:'',pw2=q('f-pin2')?q('f-pin2').value:'',pinOff=!!(q('f-pinoff')&&q('f-pinoff').checked);
     var bad=!f.start||!f.end?'시작일과 종료일을 모두 넣어 주세요.':(f.start>f.end?'종료일이 시작일보다 빨라요.':((parse(f.end)-parse(f.start))/864e5>400?'기간은 400일 이내로 정해 주세요.':(!f.roster.length?'학생 명단을 한 명 이상 넣어 주세요.':'')));
     if(!bad&&!pinOff&&(pw||pw2)){if(pw.length<4)bad='비밀번호는 4자 이상으로 정해 주세요.';else if(pw!==pw2)bad='비밀번호 확인이 맞지 않아요.'}
     if(bad){err.textContent=bad;err.hidden=false;return}
@@ -515,6 +528,11 @@ function restore(text){
   if(!s||!Array.isArray(s.students)||typeof s.stamps!=='object'||!s.start||!s.end)return '필사 도장판 백업 파일이 아니에요.';
   var ok=s.students.every(function(x){return x&&typeof x.id==='string'&&typeof x.name==='string'});
   if(!ok)return '백업 파일의 학생 명단이 올바르지 않아요.';
+  loadState(s);
+  changes.clear();settingsDirty=true;
+  return '';
+}
+function loadState(s){
   var keep=['teacherPin','noteTitle','subtitle','className','start','end','firstRound','skipWeekends','holidays','stampTop','stampBottom','stampColor','theme','students','nextId','sample','updatedAt'];
   keep.forEach(function(k){if(k in s)state[k]=s[k]});
   state.holidays=Array.isArray(state.holidays)?state.holidays:[];
@@ -522,8 +540,41 @@ function restore(text){
   state.nextId=Math.max(Number(state.nextId)||1,maxId+1);
   Object.keys(stampSet).forEach(function(k){delete stampSet[k]});
   Object.keys(s.stamps||{}).forEach(function(k){if(Array.isArray(s.stamps[k]))stampSet[k]=new Set(s.stamps[k].filter(function(d){return /^\d{4}-\d{2}-\d{2}$/.test(d)}))});
-  changes.clear();settingsDirty=true;view.month=null;
-  return '';
+  view.month=null;
+}
+
+/* Google Sheet store (used outside claude.ai when SHEET_API is set) */
+async function sheetCall(body){
+  var r=await fetch(SHEET_API,{method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},body:JSON.stringify(body),redirect:'follow'});
+  return r.json();
+}
+async function sheetLoad(){
+  var r=await fetch(SHEET_API+(SHEET_API.indexOf('?')<0?'?':'&')+'t='+Date.now(),{redirect:'follow',cache:'no-store'});
+  var j=await r.json();
+  if(j&&j.state&&Array.isArray(j.state.students))loadState(j.state);
+  sheetRev=(j&&j.rev)||'';
+}
+function tableRows(){
+  var sched=schedule(),elapsed=sched.filter(function(x){return x.date<=TODAY}).length;
+  var rows=[['번호','이름'].concat(sched.map(function(x){return x.round+'회('+md(x.date)+')'}),['완료 수','진행 회차'])];
+  state.students.forEach(function(s,i){var n=0;var cells=sched.map(function(x){if(has(s.id,x.date)){n++;return 'O'}return ''});rows.push([i+1,s.name].concat(cells,[n,elapsed]))});
+  return rows;
+}
+async function sheetSave(){
+  saving=true;render();
+  var out=snapshot();delete out.teacherPin;out.updatedAt=new Date().toISOString();
+  var j;try{j=await sheetCall({action:'save',password:sheetPw,baseRev:sheetRev,state:out,table:tableRows()})}catch(e){j={ok:false,code:'network'}}
+  saving=false;
+  if(j.ok){sheetRev=j.rev;state.updatedAt=out.updatedAt;changes.clear();settingsDirty=false;render();toast('구글 시트에 저장했어요.');return}
+  if(j.code==='conflict'){
+    var want=[];changes.forEach(function(k){var p=k.split('|');want.push([p[0],p[1],has(p[0],p[1])])});
+    var lostSettings=settingsDirty;
+    try{await sheetLoad()}catch(e){}
+    changes.clear();settingsDirty=false;want.forEach(function(w){toggle(w[0],w[1],w[2])});justStamped=null;render();
+    toast('다른 곳에서 먼저 저장된 기록을 불러와 방금 찍은 도장을 합쳤어요.'+(lostSettings?' 설정 변경은 다시 해 주세요.':'')+' 저장하기를 한 번 더 눌러 주세요.');return}
+  if(j.code==='auth'){rememberPw('');canWrite=false;render();toast('비밀번호가 맞지 않아요. 다시 로그인해 주세요.');return}
+  if(j.code==='setup'){render();toast('Apps Script의 TEACHER_PASSWORD를 먼저 바꿔 주세요.');return}
+  render();toast(j.code==='network'?'인터넷 연결을 확인하고 다시 눌러 주세요.':'저장하지 못했어요. 잠시 뒤 다시 시도해 주세요.');
 }
 function openBackup(){
   var bg=document.createElement('div');bg.className='modal-bg';
@@ -566,7 +617,13 @@ function openUnlock(){
   bg.addEventListener('keydown',function(e){if(e.key==='Escape')close()});
   bg.addEventListener('click',function(e){if(e.target===bg)close()});
   q('ul-form').addEventListener('submit',async function(e){e.preventDefault();
-    var p=state.teacherPin,err=q('ul-err'),ok=q('ul-ok');if(!p){close();return}
+    var p=state.teacherPin,err=q('ul-err'),ok=q('ul-ok');
+    if(sheetMode){var pw=q('ul-pw').value,j;ok.disabled=true;
+      try{j=await sheetCall({action:'check',password:pw})}catch(x){j={ok:false,code:'network'}}ok.disabled=false;
+      if(j.ok){rememberPw(pw);canWrite=true;studentPreview=false;close();render();toast('교사 모드로 들어왔어요.');return}
+      err.textContent=j.code==='auth'?'비밀번호가 맞지 않아요.':j.code==='setup'?'Apps Script의 TEACHER_PASSWORD를 먼저 바꿔 주세요.':'연결하지 못했어요. 인터넷 연결을 확인해 주세요.';
+      err.hidden=false;q('ul-pw').select();return}
+    if(!p){close();return}
     ok.disabled=true;var h='';try{h=await pinHash(q('ul-pw').value,p.salt,p.iter||200000)}catch(x){}ok.disabled=false;
     if(h&&h===p.hash){setUnlocked(true);studentPreview=false;close();render();toast('교사 모드로 들어왔어요.')}
     else{err.textContent=h?'비밀번호가 맞지 않아요.':'이 브라우저에서는 확인할 수 없어요.';err.hidden=false;q('ul-pw').select()}
@@ -587,6 +644,7 @@ function buildDoc(){
 
 async function save(){
   if(saving)return;
+  if(sheetMode)return sheetSave();
   if(!artifactNs){toast('미리보기에서는 저장할 수 없어요. 게시된 페이지에서 저장해 주세요.');return}
   saving=true;render();
   try{await artifactNs.publish(buildDoc());changes.clear();settingsDirty=false;toast('저장했어요. 최신 도장판을 다시 불러옵니다.')}
@@ -602,7 +660,14 @@ async function save(){
 
 render();
 (async function(){
-  if(!window.claude||typeof window.claude.use!=='function'){previewOnly=true;canWrite=true;render();return}
+  if(!window.claude||typeof window.claude.use!=='function'){
+    if(SHEET_API){sheetMode=true;render();
+      try{await sheetLoad()}catch(e){toast('저장된 기록을 불러오지 못했어요. 인터넷 연결을 확인해 주세요.')}
+      if(sheetPw){try{var c=await sheetCall({action:'check',password:sheetPw});if(c.ok)canWrite=true;else rememberPw('')}catch(e){}}
+      render();
+      document.addEventListener('visibilitychange',function(){if(document.visibilityState==='visible'&&!changes.size&&!settingsDirty&&!saving)sheetLoad().then(render).catch(function(){})});
+      return}
+    previewOnly=true;canWrite=true;render();return}
   try{
     var r=await Promise.all([window.claude.use('user'),window.claude.use('artifact'),window.claude.use('downloads')]);
     artifactNs=r[1];downloadsNs=r[2];
